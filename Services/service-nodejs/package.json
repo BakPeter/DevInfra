@@ -1,0 +1,19 @@
+{
+  "name": "service-nodejs",
+  "version": "1.0.0",
+  "description": "Express REST API service",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@datalust/winston-seq": "^1.0.0",
+    "express": "^5.2.1",
+    "kafkajs": "^2.2.4",
+    "winston": "^3.18.3"
+  }
+}
