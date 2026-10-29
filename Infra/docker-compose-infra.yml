@@ -1,14 +1,16 @@
+name: infra
+
 services:
   db-files-s3:
-    image: minio/minio:latest
+    image: minio/minio:${MINIO_IMG_TAG}
     container_name: db-files-s3-minio
     hostname: minio
     command: server /data --console-address ":9001"
     volumes:
       - ${MOUNT_DATA}/db-files-s3/minio:/data
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
     ports:
       - 9004:9000
       - 9005:9001
@@ -16,10 +18,52 @@ services:
       - infra-net
     restart: always
 
+  # Postgres #
+  postgres:
+    image: postgres:${POSTGRES_IMG_TAG}
+    container_name: postgres
+    ports:
+      - ${POSTGRES_PORT}:5432
+    volumes:
+      - ${MOUNT_DATA}/postgres:/var/lib/postgresql
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infra-net
+    restart: always
+
+  pgadmin:
+    image: dpage/pgadmin4:${PGADMIN_IMG_TAG}
+    container_name: pgadmin
+    # Runs as root so the bind-mounted data dir does not need uid 5050 ownership.
+    user: root
+    ports:
+      - ${PGADMIN_PORT}:80
+    volumes:
+      - ${MOUNT_DATA}/pgadmin:/var/lib/pgadmin
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
+      - PGADMIN_LISTEN_PORT=80
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - infra-net
+    restart: always
+
   # ELK #
   elasticsearch:
     container_name: elasticsearch
-    image: docker.elastic.co/elasticsearch/elasticsearch:9.4.4
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELK_IMG_TAG}
     ports:
       - 9200:9200
     volumes:
@@ -37,7 +81,7 @@ services:
 
   kibana:
     container_name: kibana
-    image: docker.elastic.co/kibana/kibana:9.4.4
+    image: docker.elastic.co/kibana/kibana:${ELK_IMG_TAG}
     ports:
       - 5601:5601
     volumes:
@@ -59,6 +103,8 @@ services:
       - '9092:9092'
     depends_on:
       - zookeeper
+    volumes:
+      - ${MOUNT_DATA}/kafka:/var/lib/kafka/data
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
@@ -67,6 +113,12 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     networks:
       - infra-net
     restart: always
@@ -74,6 +126,9 @@ services:
   zookeeper:
     image: confluentinc/cp-zookeeper:${KAFKA_IMG_TAG}
     container_name: zookeeper
+    volumes:
+      - ${MOUNT_DATA}/zookeeper/data:/var/lib/zookeeper/data
+      - ${MOUNT_DATA}/zookeeper/log:/var/lib/zookeeper/log
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -82,7 +137,7 @@ services:
     restart: always
 
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+    image: provectuslabs/kafka-ui:${KAFKA_UI_IMG_TAG}
     container_name: kafka-ui
     ports:
       - ${KAFKA_UI_PORT}:8080
@@ -91,13 +146,14 @@ services:
       KAFKA_CLUSTERS_0_NAME: 'local'
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: 'kafka-broker:29092'
     depends_on:
-      - kafka-broker
+      kafka-broker:
+        condition: service_healthy
     networks:
       - infra-net
     restart: always
 
   seq:
-    image: datalust/seq:latest
+    image: datalust/seq:${SEQ_IMG_TAG}
     container_name: seq
     ports:
       - ${SEQ_PORT}:80
@@ -126,9 +182,21 @@ services:
       - KAFKA_TOPIC_ITEMS_PYTHON_SERVICE=${KAFKA_TOPIC_ITEMS_PYTHON_SERVICE}
       - KAFKA_CONSUMER_GROUP_ID=${KAFKA_CONSUMER_GROUP_ID}
       - NODEJS_SERVICE_KAFKA_CONSUMER_TOPICS=${NODEJS_SERVICE_KAFKA_CONSUMER_TOPICS}
+      - KAFKA_TOPIC_STATE_NODEJS_SERVICE=${KAFKA_TOPIC_STATE_NODEJS_SERVICE}
+      - NODEJS_SERVICE_STATE_INTERVAL_SECONDS=${NODEJS_SERVICE_STATE_INTERVAL_SECONDS}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_SCHEMA=${POSTGRES_SCHEMA_NODEJS_SERVICE}
     depends_on:
-      - kafka-broker
-      - seq
+      kafka-broker:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      seq:
+        condition: service_started
     networks:
       - infra-net
     restart: always
@@ -146,18 +214,60 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka-broker:29092
       - KAFKA_TOPIC_ITEMS=${KAFKA_TOPIC_ITEMS}
       - KAFKA_TOPIC_ITEMS_PYTHON_SERVICE=${KAFKA_TOPIC_ITEMS_PYTHON_SERVICE}
+      - KAFKA_TOPIC_STATE_PYTHON_SERVICE=${KAFKA_TOPIC_STATE_PYTHON_SERVICE}
+      - PYTHON_SERVICE_STATE_INTERVAL_SECONDS=${PYTHON_SERVICE_STATE_INTERVAL_SECONDS}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_SCHEMA=${POSTGRES_SCHEMA_PYTHON_SERVICE}
     depends_on:
-      - kafka-broker
-      - seq
+      kafka-broker:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      seq:
+        condition: service_started
+    networks:
+      - infra-net
+    restart: always
+
+  service-dotnet:
+    build:
+      context: ../Services/service-dotnet
+      dockerfile: Dockerfile
+    container_name: service-dotnet
+    ports:
+      - ${DOTNET_SERVICE_REST_PORT}:${DOTNET_SERVICE_REST_PORT}
+    environment:
+      - ASPNETCORE_URLS=http://+:${DOTNET_SERVICE_REST_PORT}
+      - SEQ_SERVER_URL=http://seq
+      - KAFKA_BOOTSTRAP_SERVERS=kafka-broker:29092
+      - KAFKA_TOPIC_STATE_DOTNET_SERVICE=${KAFKA_TOPIC_STATE_DOTNET_SERVICE}
+      - DOTNET_SERVICE_STATE_INTERVAL_SECONDS=${DOTNET_SERVICE_STATE_INTERVAL_SECONDS}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_SCHEMA=${POSTGRES_SCHEMA_DOTNET_SERVICE}
+    depends_on:
+      kafka-broker:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      seq:
+        condition: service_started
     networks:
       - infra-net
     restart: always
 
 networks:
   infra-net:
-    # driver: bridge
+    driver: bridge
     name: infra-net
-    external: true
+    # external: true
   # infra-api:
   #   driver: bridge
   #   name: infra-api
